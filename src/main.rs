@@ -3,6 +3,7 @@ extern crate regex;
 extern crate reqwest;
 extern crate serde_json;
 
+use regex::Regex;
 use std::fs;
 use std::io::copy;
 use std::path::PathBuf;
@@ -15,7 +16,7 @@ use std::thread;
 extern crate serde_derive;
 
 use clap::{App, Arg};
-mod ch_thread;
+mod post;
 
 const THREAD_COUNT: usize = 5;
 
@@ -54,30 +55,43 @@ fn main() {
                 .short("a")
                 .long("animated")
                 .help("Include Animated Files (gif, webm etc.)"),
+        ).arg(
+            Arg::with_name("verbose")
+                .short("v")
+                .long("verbose")
+                .help("Print out urls that were succefully downloaded"),
         ).get_matches();
 
-    let url = matches.value_of("url");
-    let board = matches.value_of("board");
+    let mut url = matches.value_of("url").map(str::to_string);
+    let mut board = matches.value_of("board").map(str::to_string);
     let id = matches.value_of("id");
     let directory = PathBuf::from(matches.value_of("directory").unwrap());
 
     fs::create_dir_all(&directory).expect("Error creating directory");
 
-    let thread = match (url, board, id) {
-        (Some(url), _, _) => ch_thread::Thread::from_url(url),
-        (None, Some(board), Some(id)) => ch_thread::Thread::from_id(board, id),
+    match (url, board, id) {
+        (Some(link), _, _) => {
+            board = Some(board_from_url(&link));
+            url = Some(link);
+        }
+        (None, Some(b), Some(id)) => {
+            url = Some(url_from_board_and_id(&b, id));
+            board = Some(b);
+        }
         _ => panic!("Please either provide a board and an id or a url to the thread"),
     };
 
-    let response = thread.get_json();
+    let url = url.unwrap();
+    let board = board.unwrap();
 
-    let mut formats: Vec<&str> = Vec::new();
-    formats.append(&mut vec![".jpg", ".png", ".jpeg"]);
+    let response = get_thread(&url);
+
+    let mut formats = vec![".jpg", ".png", ".jpeg"];
     if matches.is_present("include_animated") {
-        formats.append(&mut vec![".webm", ".gif"]);
+        formats.extend_from_slice(&[".webm", ".gif"]);
     }
 
-    let file_posts: Vec<ch_thread::Post> = response
+    let file_posts: Vec<post::Post> = response
         .posts
         .into_iter()
         .filter(|p| formats.contains(&&p.ext[..]))
@@ -85,14 +99,47 @@ fn main() {
 
     let file_urls: Vec<String> = file_posts
         .into_iter()
-        .map(|x| get_file_url(thread.get_board(), x))
+        .map(|x| get_file_url(&board, x))
         .flat_map(|e| e)
         .collect();
 
-    download_files(directory, file_urls);
+    download_files(directory, file_urls, matches.is_present("verbose"));
 }
 
-fn get_file_url(board: &str, post: ch_thread::Post) -> Option<String> {
+fn board_from_url(url: &str) -> String {
+    let re = Regex::new(
+        r"^(https://|http://)?(www\.)?boards\.4chan\.org/(?P<board>\D+)/thread/(?P<id>\d+)$",
+    ).unwrap();
+
+    if !re.is_match(url) {
+        panic!("Provided URL was in an invalid format, expected \"boards.4chan.org/{board}/thread/{id}\"");
+    }
+
+    let captures = re.captures(url).unwrap();
+
+    captures.name("board").unwrap().as_str().to_string()
+}
+
+fn url_from_board_and_id(board: &str, id: &str) -> String {
+    format!("https://boards.4chan.org/{}/thread/{}", board, id)
+}
+
+fn get_thread(url: &str) -> post::Resp {
+    use self::reqwest::StatusCode;
+
+    let mut url = url.to_owned();
+    url.push_str(".json");
+    let mut res = reqwest::get(&url).expect("Error perorming GET request");
+
+    if res.status() != StatusCode::Ok {
+        panic!(format!("Received non-ok status code {}", res.status()));
+    }
+
+    res.json::<post::Resp>()
+        .expect("Error parsing response JSON")
+}
+
+fn get_file_url(board: &str, post: post::Post) -> Option<String> {
     if post.tim != 0 && !post.ext.is_empty() {
         Some(format!(
             "https://i.4cdn.org/{}/{}{}",
@@ -108,7 +155,7 @@ enum Message {
     Terminate,
 }
 
-fn download_files(directory: PathBuf, urls: Vec<String>) {
+fn download_files(directory: PathBuf, urls: Vec<String>, verbose: bool) {
     let (sender, receiver) = mpsc::channel();
     let receiver = Arc::new(Mutex::new(receiver));
     let directory = Arc::new(directory);
@@ -124,6 +171,16 @@ fn download_files(directory: PathBuf, urls: Vec<String>) {
             match message {
                 Message::File(url) => {
                     let result = download_file(&dir, &url);
+                    match result {
+                        Ok(_) => {
+                            if verbose {
+                                println!("Downloaded {}", url)
+                            }
+                        }
+                        Err(e) => {
+                            println!("Error downloading image {}: {}", url, e.description());
+                        }
+                    }
                 }
                 Message::Terminate => break,
             }
