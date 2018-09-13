@@ -1,10 +1,8 @@
 #[derive(Debug, Deserialize)]
 pub struct Post {
-    #[serde(default)]
-    pub ext: String,
-
-    #[serde(default)]
-    pub tim: u64,
+    pub ext: Option<String>,
+    #[serde(rename = "tim")]
+    pub img_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
