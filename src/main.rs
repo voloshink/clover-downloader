@@ -31,58 +31,56 @@ fn main() {
                 .long("board")
                 .value_name("BOARD")
                 .help("The Board Hosting the Thread"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("id")
                 .short("i")
                 .long("id")
                 .value_name("ID")
                 .help("The ID of the Thread"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("url")
                 .short("u")
                 .long("url")
                 .value_name("URL")
                 .help("The URL of the thread"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("directory")
                 .short("d")
                 .long("directory")
                 .value_name("PATH")
                 .required(true)
                 .help("The Directory Where the Files will be Saved"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("include_animated")
                 .short("a")
                 .long("animated")
                 .help("Include Animated Files (gif, webm etc.)"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("verbose")
                 .short("v")
                 .long("verbose")
                 .help("Print out urls that were succefully downloaded"),
-        ).get_matches();
+        )
+        .get_matches();
 
-    let mut url = matches.value_of("url").map(str::to_string);
-    let mut board = matches.value_of("board").map(str::to_string);
+    let url = matches.value_of("url");
+    let board = matches.value_of("board");
     let id = matches.value_of("id");
     let directory = PathBuf::from(matches.value_of("directory").unwrap());
 
     fs::create_dir_all(&directory).expect("Error creating directory");
 
-    match (url, board, id) {
-        (Some(link), _, _) => {
-            board = Some(board_from_url(&link));
-            url = Some(link);
-        }
-        (None, Some(b), Some(id)) => {
-            url = Some(url_from_board_and_id(&b, id));
-            board = Some(b);
-        }
+    let (mut url, board) = match (url, board, id) {
+        (Some(link), _, _) => (link.to_string(), board_from_url(&link)),
+        (_, Some(b), Some(id)) => (url_from_board_and_id(b, id), b),
         _ => panic!("Please either provide a board and an id or a url to the thread"),
     };
-
-    let url = url.unwrap();
-    let board = board.unwrap();
+    url.push_str(".json");
 
     let response = get_thread(&url);
 
@@ -91,33 +89,34 @@ fn main() {
         formats.extend_from_slice(&[".webm", ".gif"]);
     }
 
-    let file_posts: Vec<post::Post> = response
+    let file_posts = response
         .posts
         .into_iter()
-        .filter(|p| formats.contains(&&p.ext[..]))
-        .collect();
+        .filter(|p| match p.ext {
+            Some(ref s) => formats.contains(&s.as_str()),
+            None => false,
+        })
+        .collect::<Vec<post::Post>>();
 
     let file_urls: Vec<String> = file_posts
         .into_iter()
-        .map(|x| get_file_url(&board, x))
-        .flat_map(|e| e)
+        .flat_map(|x| get_file_url(&board, x))
         .collect();
 
     download_files(directory, file_urls, matches.is_present("verbose"));
 }
 
-fn board_from_url(url: &str) -> String {
+fn board_from_url(url: &str) -> &str {
     let re = Regex::new(
         r"^(https://|http://)?(www\.)?boards\.4chan\.org/(?P<board>\D+)/thread/(?P<id>\d+)$",
     ).unwrap();
 
-    if !re.is_match(url) {
-        panic!("Provided URL was in an invalid format, expected \"boards.4chan.org/{board}/thread/{id}\"");
+    match re.captures(url).and_then(|c| c.name("board")) {
+        Some(board) => board.as_str(),
+        None => panic!(
+            "Provided URL was in an invalid format, expected \"boards.4chan.org/{board}/thread/{id}\""
+        )
     }
-
-    let captures = re.captures(url).unwrap();
-
-    captures.name("board").unwrap().as_str().to_string()
 }
 
 fn url_from_board_and_id(board: &str, id: &str) -> String {
@@ -126,28 +125,17 @@ fn url_from_board_and_id(board: &str, id: &str) -> String {
 
 fn get_thread(url: &str) -> post::Resp {
     use self::reqwest::StatusCode;
+    let mut res = reqwest::get(url).expect("Error perorming GET request");
 
-    let mut url = url.to_owned();
-    url.push_str(".json");
-    let mut res = reqwest::get(&url).expect("Error perorming GET request");
-
-    if res.status() != StatusCode::Ok {
+    if res.status() != StatusCode::OK {
         panic!(format!("Received non-ok status code {}", res.status()));
     }
 
-    res.json::<post::Resp>()
-        .expect("Error parsing response JSON")
+    res.json().expect("Error parsing response JSON")
 }
 
 fn get_file_url(board: &str, post: post::Post) -> Option<String> {
-    if post.tim != 0 && !post.ext.is_empty() {
-        Some(format!(
-            "https://i.4cdn.org/{}/{}{}",
-            board, post.tim, post.ext
-        ))
-    } else {
-        None
-    }
+    Some(format!("https://i.4cdn.org/{}/{}{}", board, post.img_id?, post.ext?))
 }
 
 enum Message {
