@@ -135,7 +135,10 @@ fn get_thread(url: &str) -> post::Resp {
 }
 
 fn get_file_url(board: &str, post: post::Post) -> Option<String> {
-    Some(format!("https://i.4cdn.org/{}/{}{}", board, post.img_id?, post.ext?))
+    Some(format!(
+        "https://i.4cdn.org/{}/{}{}",
+        board, post.img_id?, post.ext?
+    ))
 }
 
 enum Message {
